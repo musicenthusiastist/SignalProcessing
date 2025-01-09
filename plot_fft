@@ -1,0 +1,19 @@
+filename = "IM_IQ_.csv";
+
+fs = 400e6; % example value
+N = 1024; % example value
+data_iq = readmatrix(filename);
+data_i = data_iq(:,1);
+data_q = data_iq(:,2);
+z= complex(data_i,data_q);
+fft_data = fftshift(fft(z));
+amp = 10 * log10(sqrt(data_i.^2 + data_q.^2));
+p = 20 * log10(abs(fft_data)+0.001);
+f = (-N/2 : N/2-1) * (fs / N);
+
+figure;
+plot(amp);
+title('Mag vs sample#');
+figure;
+plot(f,p);
+title('FFT spectrum');
