@@ -1,6 +1,6 @@
 %% ========================================================================
 %  Single-carrier 16QAM + Rapp PA + Iterative GMP-DPD (ILA)
-%  Include：CFR, Rapp PA(AM/AM+AM/PM), GMP-DPD, Iterative ILA
+%  Include：LTE baseband generation, CFR, Rapp PA(AM/AM+AM/PM), GMP-DPD, Iterative ILA
 % ========================================================================
 clear; clc; close all;
 
@@ -327,3 +327,4 @@ function ACLR = estimateACLR(x, Fs)
 
     ACLR = [ACLR_L, ACLR_R];
 end
+
