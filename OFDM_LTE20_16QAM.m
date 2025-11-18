@@ -28,15 +28,21 @@ qamSym  = qammod(dataInt, M_qam, 'UnitAveragePower', true);  % avg power = 1
 % Reshape the resulting symbols into an array of dimensions [Subcarriers x OFDM Symbols]
 qamGrid = reshape(qamSym, NscUsed, NsymOFDM);
 
-%% ----------------- 2. Map the frequency-domain symbols onto the 2048 IFFT grid (Inverse Fast Fourier Transform grid size) -----------------
-% LTE 20 MHz Configuration: Place 1200 consecutive subcarriers at the center of the spectrum (including both sides of the DC (Direct Current) carrier)
+%% ----------------- 2. LTE-compliant subcarrier mapping (36.211) -----------------
 ofdmGrid = zeros(Nfft, NsymOFDM);
 
-% Frequency Domain Indexing: Use center-symmetric indexing, mapping indices -600 through +599 onto the IFFT grid
-scIdx = (-NscUsed/2 : NscUsed/2-1);          % -600 ... +599
-fftBin = mod(scIdx, Nfft) + 1;               % Translate to index 1..2048 
+% 600 left subcarriers  → map to bins [Nfft-600+1 : Nfft] = [1449 : 2048]
+leftBins = (Nfft - NscUsed/2 + 1) : Nfft;
+ofdmGrid(leftBins, :) = qamGrid(1:NscUsed/2, :);
 
-ofdmGrid(fftBin, :) = qamGrid;
+% 599 right subcarriers → map to bins [2 : 600]
+rightBins = 2 : (NscUsed/2 + 1);
+ofdmGrid(rightBins, :) = qamGrid(NscUsed/2+1:end, :);
+
+% bin 1 (DC) stays zero
+ofdmGrid(1, :) = 0;
+
+idxUsed = [leftBins, rightBins];   % 1×1200 的 FFT bin index
 
 %% ----------------- 3. 2048 IFFT -> Time Domain OFDM -----------------
 tx_noCP = ifft(ofdmGrid, Nfft, 1);           % [Nfft × NsymOFDM]
@@ -46,6 +52,14 @@ tx_withCP = [tx_noCP(end-Ncp+1:end, :); tx_noCP];   % [(Ncp+Nfft) × NsymOFDM]
 
 % Serialize the data into a one-dimensional time-domain baseband sequence
 tx_bb = tx_withCP(:);
+%% --- Add simple CFR (hard clipping) ---
+PAPR_target_dB = 7.5;      % typical after CFR
+rms_val = sqrt(mean(abs(tx_bb).^2));
+A_clip  = rms_val * 10^(PAPR_target_dB/20);
+
+mag = abs(tx_bb);
+ang = angle(tx_bb);
+tx_bb = min(mag, A_clip) .* exp(1j*ang);
 
 %% ----------------- 5. Power normalization & PAPR (Peak-to-Average Power Ratio) adjustment/calculation -----------------
 tx_bb = tx_bb / sqrt(mean(abs(tx_bb).^2));  % Normalize the average power to 1
@@ -78,8 +92,8 @@ rx_noCP = rx_mat(Ncp+1:end, :);
 % FFT
 RxGrid = fft(rx_noCP, Nfft, 1);   % [Nfft × Nsym_rx]
 
-% Use the same subcarrier index as was used during transmission
-RxUsed = RxGrid(fftBin, :);
+% Use the same subcarrier indices as in TX mapping
+RxUsed = RxGrid(idxUsed, :);      % 1200 × Nsym_rx
 
 % Select a central subcarrier, for example, index = 600 (near 0Hz)
 scPick = floor(NscUsed/2) + 1;    % The central subcarrier
