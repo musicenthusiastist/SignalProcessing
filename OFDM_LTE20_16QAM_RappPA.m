@@ -122,13 +122,13 @@ fprintf('PA stage sampling rate Fs_pa = %.2f MHz\n', Fs_pa/1e6);
 %% --------------------------------------------------------------------
 %  7. Memoryless Rapp PA with AM/PM (same style as old code)
 %% --------------------------------------------------------------------
-A_sat  = 1.5;    % saturation amplitude
+A_sat  = 3;    % saturation amplitude
 p_rapp = 2;      % smoothness factor
-G_lin  = 3.0;    % small-signal gain
+G_lin  = 3;    % small-signal gain
 k_phi  = 0.3;    % AM/PM coefficient (rad)
 
 % Drive level in dB (how hard we push into compression)
-drive_dB     = 2;                       % same as your old script
+drive_dB     = 2;                     
 drive_linear = 10^(drive_dB/20);
 
 u = drive_linear * x_cfr_pa;            % PA input
@@ -154,7 +154,8 @@ P_out = mean(abs(y_pa).^2);
 alpha = sqrt(P_in / P_out);
 
 y_pa_norm = alpha * y_pa;   % normalized PA output
-
+fprintf('mean(abs(y_pa).^2) = %.3f, max(abs(y_pa)) / sqrt(mean(abs(y_pa).^2)) = %.3f',...
+    mean(abs(y_pa_norm).^2), max(abs(y_pa_norm)) / sqrt(mean(abs(y_pa_norm).^2)));
 %% --------------------------------------------------------------------
 %  9. Spectra: input vs PA output (shoulder now looks like old plot)
 %% --------------------------------------------------------------------
