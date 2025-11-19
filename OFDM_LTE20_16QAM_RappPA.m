@@ -1,154 +1,201 @@
-%% LTE 20 MHz OFDM + CFR + Hammerstein Rapp PA with memory
+%% LTE 20 MHz OFDM + CFR + Oversampled Rapp PA (no DPD)
 clear; clc; close all;
 
-%% 0. LTE OFDM parameters (20 MHz, downlink-like)
-Fs      = 30.72e6;      % sampling rate
-Nfft    = 2048;         % IFFT size
-NscUsed = 1200;         % active subcarriers (100 RB x 12)
-SubSp   = 15e3;         % subcarrier spacing
-BW_occu = NscUsed * SubSp;   % occupied BW ~= 18 MHz
+%% --------------------------------------------------------------------
+%  0. LTE 20 MHz OFDM parameters (baseband, 30.72 MHz)
+%% --------------------------------------------------------------------
+Fs_bb   = 30.72e6;     % baseband sampling rate for LTE 20 MHz
+Nfft    = 2048;        % IFFT size
+NscUsed = 1200;        % active subcarriers (100 RB x 12)
+SubSp   = 15e3;        % subcarrier spacing
+BW_occu = NscUsed * SubSp;   % occupied BW ≈ 18 MHz
 
-Ncp     = 144;          % fixed CP length (normal CP-like)
-NsymOFDM= 1000;         % number of OFDM symbols
-M_qam   = 16;           % 16-QAM
+Ncp     = 144;         % fixed CP length
+NsymOFDM= 1000;        % number of OFDM symbols
+M_qam   = 16;          % 16-QAM
 
-fprintf('Fs = %.2f MHz, Nfft = %d, NscUsed = %d, BW_occu ≈ %.2f MHz\n',...
-    Fs/1e6, Nfft, NscUsed, BW_occu/1e6);
+fprintf('Baseband: Fs = %.2f MHz, Nfft = %d, NscUsed = %d, BW_occu ≈ %.2f MHz\n',...
+    Fs_bb/1e6, Nfft, NscUsed, BW_occu/1e6);
 
-%% 1. 16-QAM data per subcarrier
+%% --------------------------------------------------------------------
+%  1. 16-QAM symbols per subcarrier
+%% --------------------------------------------------------------------
 bitsPerSym_SC = log2(M_qam);
 bitsPerOFDM   = bitsPerSym_SC * NscUsed;
 
-bits  = randi([0 1], bitsPerOFDM * NsymOFDM, 1);
-dataI = bi2de(reshape(bits, [], bitsPerSym_SC));       % bits -> integers
-qamSym = qammod(dataI, M_qam, 'UnitAveragePower', true); % avg power = 1
+bits    = randi([0 1], bitsPerOFDM * NsymOFDM, 1);
+dataInt = bi2de(reshape(bits, [], bitsPerSym_SC));              % bits -> integers
+qamSym  = qammod(dataInt, M_qam, 'UnitAveragePower', true);     % avg power = 1
 
-qamGrid = reshape(qamSym, NscUsed, NsymOFDM);          % [NscUsed x Nsym]
+qamGrid = reshape(qamSym, NscUsed, NsymOFDM);                   % [NscUsed x Nsym]
 
-%% 2. Apply a simple frequency-domain raised-cosine taper (TX shaping)
-% This mimics TX filtering / windowing ⇒ roll-off at band edges.
-rolloff = 0.2;                   % 20% of active band used for taper
-Nedge   = floor(rolloff * NscUsed / 2);  % number of bins per edge
-w = ones(NscUsed,1);
+%% --------------------------------------------------------------------
+%  2. Optional TX edge shaping (set rolloff=0 to see plain rectangular)
+%% --------------------------------------------------------------------
+rolloff = 0.1;                   % 10% of active band used for taper
+Nedge   = floor(rolloff * NscUsed / 2);
+w       = ones(NscUsed,1);
 
 if Nedge > 0
-    t = (0:Nedge-1)'/(Nedge-1);          % 0..1
-    ramp = 0.5*(1 - cos(pi*t));         % raised-cosine from 0→1
-
-    w(1:Nedge)               = ramp;        % left edge
-    w(end-Nedge+1:end)       = flipud(ramp);% right edge
+    t    = (0:Nedge-1)'/(Nedge-1);         % 0..1
+    ramp = 0.5*(1 - cos(pi*t));           % raised-cosine 0 -> 1
+    w(1:Nedge)             = ramp;        % left edge
+    w(end-Nedge+1:end)     = flipud(ramp);
 end
 
 qamGrid_shaped = bsxfun(@times, qamGrid, w);
 
-%% 3. Map onto 2048-point IFFT grid
+%% --------------------------------------------------------------------
+%  3. Map onto 2048-point IFFT grid
+%% --------------------------------------------------------------------
 ofdmGrid = zeros(Nfft, NsymOFDM);
 
-scIdx = (-NscUsed/2 : NscUsed/2-1);       % -600..+599
-fftBin = mod(scIdx, Nfft) + 1;            % 1..2048
+% Centered mapping: -600..+599 -> 2048 bins
+scIdx = (-NscUsed/2 : NscUsed/2-1);   % -600..+599
+fftBin = mod(scIdx, Nfft) + 1;        % 1..2048
 
 ofdmGrid(fftBin, :) = qamGrid_shaped;
 
-%% 4. IFFT + CP
-tx_noCP = ifft(ofdmGrid, Nfft, 1);        % [Nfft x Nsym]
-tx_withCP = [tx_noCP(end-Ncp+1:end,:); tx_noCP];   % [(Ncp+Nfft) x Nsym]
+%% --------------------------------------------------------------------
+%  4. IFFT + CP  -> baseband time-domain at 30.72 MHz
+%% --------------------------------------------------------------------
+tx_noCP   = ifft(ofdmGrid, Nfft, 1);                 % [Nfft x Nsym]
+tx_withCP = [tx_noCP(end-Ncp+1:end,:); tx_noCP];     % [(Ncp+Nfft) x Nsym]
 
-tx_bb = tx_withCP(:);                     % serialize
+tx_bb = tx_withCP(:);                                % serialize
 
-%% 5. Normalize average power and apply simple CFR
+%% --------------------------------------------------------------------
+%  5. Normalize power and apply simple CFR (at baseband Fs_bb)
+%% --------------------------------------------------------------------
 tx_bb = tx_bb / sqrt(mean(abs(tx_bb).^2));    % avg power = 1
 
 papr_lin = max(abs(tx_bb).^2) / mean(abs(tx_bb).^2);
 papr_dB  = 10*log10(papr_lin);
 fprintf('OFDM baseband PAPR (before CFR) ≈ %.2f dB\n', papr_dB);
 
-% Simple hard-clipping CFR to target PAPR
-PAPR_target_dB = 7.5;                      % target PAPR (adjust if you like)
+% Hard clipping CFR
+PAPR_target_dB = 7.5;
 rms_val = sqrt(mean(abs(tx_bb).^2));
 A_clip  = rms_val * 10^(PAPR_target_dB/20);
 
-mag = abs(tx_bb);
-ang = angle(tx_bb);
+mag      = abs(tx_bb);
+ang      = angle(tx_bb);
 mag_clip = min(mag, A_clip);
-x_cfr = mag_clip .* exp(1j*ang);
+x_cfr_bb = mag_clip .* exp(1j*ang);
 
-papr_lin_after = max(abs(x_cfr).^2) / mean(abs(x_cfr).^2);
+papr_lin_after = max(abs(x_cfr_bb).^2) / mean(abs(x_cfr_bb).^2);
 papr_dB_after  = 10*log10(papr_lin_after);
 fprintf('PAPR after CFR ≈ %.2f dB\n', papr_dB_after);
 
-%% 6. Hammerstein Rapp PA with memory
-% Memory FIR (models bias network, matching network, etc.)
-h_mem = [1.0 0.1 0.01];
-h_mem = h_mem / sum(abs(h_mem));      % normalize for ~1 average gain
+% Design a simple TX low-pass filter to emulate baseband TX filtering
+% Passband ~ 9 MHz, stopband ~ 12 MHz at Fs_bb = 30.72 MHz
+Fp = 9e6;      % passband edge
+Fsb = 12e6;    % stopband edge
+Rp = 0.1;      % passband ripple (dB)
+As = 60;       % stopband attenuation (dB)
 
-% Rapp AM/AM parameters
-A_sat  = 1.5;                         % saturation amplitude
-p_rapp = 3;                           % smoothness factor
-G_lin  = 4.0;                         % small-signal linear gain
+% Normalized frequencies
+Wp = Fp / (Fs_bb/2);
+Ws = Fsb / (Fs_bb/2);
 
-% AM/PM (mild)
-k_phi  = 0.3;                         % AM/PM coefficient (rad)
+% Use a standard equiripple (or Kaiser) design
+dev = [ (10^(Rp/20)-1)/(10^(Rp/20)+1)  10^(-As/20) ];
+[n,fo,ao,w] = remezord([Fp Fsb],[1 0],[dev(1) dev(2)], Fs_bb);
+h_tx = remez(n, fo, ao, w);   % baseband TX filter
 
+% Filter the clipped signal (this removes most CFR spectral regrowth)
+x_cfr_filt = filter(h_tx, 1, x_cfr_bb);
+
+% Optional: renormalize power after TX filtering
+x_cfr_filt = x_cfr_filt / sqrt(mean(abs(x_cfr_filt).^2));
+%% --------------------------------------------------------------------
+%  6. Oversample 4x before PA
+%% --------------------------------------------------------------------
+OSR_PA = 4;                          % oversampling ratio for PA stage
+Fs_pa  = Fs_bb * OSR_PA;             % PA sampling rate => 122.88 MHz
+
+% Polyphase resampling (anti-alias filter included)
+x_cfr_pa = resample(x_cfr_filt, OSR_PA, 1);
+
+fprintf('PA stage sampling rate Fs_pa = %.2f MHz\n', Fs_pa/1e6);
+
+%% --------------------------------------------------------------------
+%  7. Memoryless Rapp PA with AM/PM (same style as old code)
+%% --------------------------------------------------------------------
+A_sat  = 1.5;    % saturation amplitude
+p_rapp = 2;      % smoothness factor
+G_lin  = 3.0;    % small-signal gain
+k_phi  = 0.3;    % AM/PM coefficient (rad)
+
+% Drive level in dB (how hard we push into compression)
+drive_dB     = 2;                       % same as your old script
+drive_linear = 10^(drive_dB/20);
+
+u = drive_linear * x_cfr_pa;            % PA input
+
+% Rapp AM/AM and AM/PM
 rappAMAM = @(r) (G_lin .* r) ./ (1 + (r./A_sat).^(2*p_rapp)).^(1/(2*p_rapp));
 rappAMPM = @(r) k_phi * (r./A_sat).^2;
 
-% Drive level (how close to compression)
-drive_dB     = +1.5;                  % try 1..2 dB
-drive_linear = 10^(drive_dB/20);
-
-% PA input (after CFR)
-x_in = drive_linear * x_cfr;
-
-% Memory stage (FIR) -> x_mem is the input to the static Rapp
-x_mem = filter(h_mem, 1, x_in);
-
-% Static Rapp nonlinearity
-r_in   = abs(x_mem);
-phi_in = angle(x_mem);
+r_in   = abs(u);
+phi_in = angle(u);
 r_out  = rappAMAM(r_in);
 phi_out= phi_in + rappAMPM(r_in);
 y_pa   = r_out .* exp(1j*phi_out);
 
-fprintf('[PA only] avg|x_mem| = %.3f, peak|x_mem| = %.3f, max/Asat = %.2f\n',...
+fprintf('[PA only] avg|u| = %.3f, peak|u| = %.3f, max/Asat = %.2f\n',...
     mean(r_in), max(r_in), max(r_in)/A_sat);
 
-%% 7. Spectra: original vs CFR vs PA output
+%% --------------------------------------------------------------------
+%  8. Power normalization: keep PA output power comparable to input
+%% --------------------------------------------------------------------
+P_in  = mean(abs(u).^2);
+P_out = mean(abs(y_pa).^2);
+alpha = sqrt(P_in / P_out);
+
+y_pa_norm = alpha * y_pa;   % normalized PA output
+
+%% --------------------------------------------------------------------
+%  9. Spectra: input vs PA output (shoulder now looks like old plot)
+%% --------------------------------------------------------------------
 Nfft_psd = 8192;
-[pxx_tx,f]   = pwelch(tx_bb, hamming(4096), 2048, Nfft_psd, Fs, 'centered');
-[pxx_cfr,~]  = pwelch(x_cfr,  hamming(4096), 2048, Nfft_psd, Fs, 'centered');
-[pxx_pa, ~]  = pwelch(y_pa,   hamming(4096), 2048, Nfft_psd, Fs, 'centered');
+[pxx_in, f]   = pwelch(u,         hamming(4096), 2048, Nfft_psd, Fs_pa, 'centered');
+[pxx_pa, ~]   = pwelch(y_pa_norm, hamming(4096), 2048, Nfft_psd, Fs_pa, 'centered');
+[pxx_bb, ~]   = pwelch(x_cfr_pa,  hamming(4096), 2048, Nfft_psd, Fs_pa, 'centered');
 
 figure;
-plot(f/1e6, 10*log10(pxx_tx  + eps), 'b', 'LineWidth', 1); hold on;
-plot(f/1e6, 10*log10(pxx_cfr + eps), 'm', 'LineWidth', 1);
-plot(f/1e6, 10*log10(pxx_pa  + eps), 'r', 'LineWidth', 1);
+plot(f/1e6, 10*log10(pxx_pa + eps), 'r', 'LineWidth', 1); hold on;
+plot(f/1e6, 10*log10(pxx_in + eps), 'b', 'LineWidth', 1);
+plot(f/1e6, 10*log10(pxx_bb + eps), 'g', 'LineWidth', 1);
 grid on;
 xlabel('Frequency (MHz)');
 ylabel('PSD (dB/Hz, normalized)');
-title('Spectrum: baseband, CFR output, PA output with memory');
-legend('Original baseband','After CFR','After PA (with memory)','Location','SouthWest');
-xlim([-30 30]);    % look wider than just the occupied band
+title('Spectrum: PA input vs PA output (LTE 20 MHz, oversampled)');
+legend('PA output','PA input','CFR output (upsampled)','Location','SouthWest');
+xlim([-50 50]);     % now you have room to see the “shoulder” rise
 
-%% 8. Effective AM/AM (using memory input x_mem)
-valid_idx = (length(h_mem):length(x_mem)).';   % drop initial FIR transient
+%% --------------------------------------------------------------------
+% 10. Effective AM/AM & AM/PM (u -> y_pa_norm)
+%% --------------------------------------------------------------------
+valid_idx = (1:length(u)).';     % no explicit memory here
 
-r_in_eff  = abs(x_mem(valid_idx));
-r_out_eff = abs(y_pa(valid_idx));
+r_in_eff  = abs(u(valid_idx));
+r_out_eff = abs(y_pa_norm(valid_idx));
 
 figure;
-plot(r_in_eff, r_out_eff, '.', 'MarkerSize', 2); grid on;
-xlabel('Input amplitude |x_{mem}|');
-ylabel('Output amplitude |y_{PA}|');
-title('Effective AM/AM: Rapp PA with memory (Hammerstein)');
+plot(r_in_eff, r_out_eff, '.', 'MarkerSize', 2);
+grid on;
+xlabel('Input amplitude |u|');
+ylabel('Output amplitude |y_{PA}| (normalized)');
+title('Effective AM/AM: memoryless Rapp PA');
 
-%% 9. Effective AM/PM (phase of y relative to x_mem, wrapped)
-phi_eff = angle(y_pa(valid_idx) .* conj(x_mem(valid_idx)));  % in [-pi, pi]
+phi_eff = angle(y_pa_norm(valid_idx) .* conj(u(valid_idx)));   % phase(y/x)
 
-% Bin-average for a smoother curve
-nbins = 60;
-edges = linspace(min(r_in_eff), max(r_in_eff), nbins+1);
-r_bin  = nan(nbins,1);
-phi_bin= nan(nbins,1);
+% Bin-average for smoother AM/PM
+nbins   = 60;
+edges   = linspace(min(r_in_eff), max(r_in_eff), nbins+1);
+r_bin   = nan(nbins,1);
+phi_bin = nan(nbins,1);
 for k = 1:nbins
     idx = (r_in_eff >= edges(k) & r_in_eff < edges(k+1));
     if any(idx)
@@ -161,7 +208,48 @@ figure;
 plot(r_in_eff, phi_eff, '.', 'MarkerSize', 1); hold on;
 plot(r_bin, phi_bin, 'r-', 'LineWidth', 2);
 grid on;
-xlabel('Input amplitude |x_{mem}|');
+xlabel('Input amplitude |u|');
 ylabel('Phase shift (rad)');
-title('Effective AM/PM: Rapp PA with memory');
+title('Effective AM/PM: memoryless Rapp PA');
 legend('Scatter','Binned average','Location','SouthEast');
+
+%% --------------------------------------------------------------------
+% 11. Simple 3GPP-style ACLR for LTE 20 MHz
+%% --------------------------------------------------------------------
+BW_main = 18e6;          % ≈ occupied BW
+ACLR_in  = estimateACLR_3gpp(u,         Fs_pa, BW_main);
+ACLR_paN = estimateACLR_3gpp(y_pa_norm, Fs_pa, BW_main);
+
+fprintf('\n[ACLR] PA input : L = %.2f dB, R = %.2f dB\n', ACLR_in(1),  ACLR_in(2));
+fprintf('[ACLR] PA output: L = %.2f dB, R = %.2f dB\n', ACLR_paN(1), ACLR_paN(2));
+
+%% ====================== Local functions ==============================
+function ACLR = estimateACLR_3gpp(x, Fs, BW_main)
+    % Very simple 3GPP-like ACLR:
+    % - main channel:   f in [-BW_main/2, +BW_main/2]
+    % - left adjacent:  centered at -20 MHz, same BW
+    % - right adjacent: centered at +20 MHz, same BW
+
+    Nfft = 8192;
+    [pxx,f] = pwelch(x, hamming(4096), 2048, Nfft, Fs, 'centered');
+
+    % Main band
+    idx_main = (f >= -BW_main/2 & f <= BW_main/2);
+    P_main   = sum(pxx(idx_main));
+
+    % Channel spacing for LTE 20 MHz is 20 MHz
+    f_off = 20e6;
+
+    % Left adjacent
+    idx_L = (f >= -f_off - BW_main/2) & (f <= -f_off + BW_main/2);
+    P_L   = sum(pxx(idx_L));
+
+    % Right adjacent
+    idx_R = (f >=  f_off - BW_main/2) & (f <=  f_off + BW_main/2);
+    P_R   = sum(pxx(idx_R));
+
+    ACLR_L = 10*log10(P_main / (P_L + eps));
+    ACLR_R = 10*log10(P_main / (P_R + eps));
+
+    ACLR = [ACLR_L, ACLR_R];
+end
